@@ -92,13 +92,13 @@ def load_fen(gs, fen):
     if len(ep) == 2:
         c = ord(ep[0]) - ord("a")
         r = 8 - int(ep[1])
-        gs.enpassantPossible = (r << 4) | c if (0 <= r < 8 and 0 <= c < 8) else -1
+        gs.en_passant_possible = (r << 4) | c if (0 <= r < 8 and 0 <= c < 8) else -1
     else:
-        gs.enpassantPossible = -1
+        gs.en_passant_possible = -1
 
     gs.half_move_clock = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
     gs.move_log.clear()
-    gs.enpassantPossibleLog = [gs.enpassantPossible]
+    gs.en_passant_possible_log = [gs.en_passant_possible]
     gs.castling_rights_log = [gs.castling_rights]
     gs.stateLog.clear()
     gs.checkmate = False
@@ -109,7 +109,7 @@ def load_fen(gs, fen):
     gs.zobristHash = h
     gs.positionHistory = [h]
     gs.repetitionCounts = {h: 1}
-    gs.repetitionSignature = ChessEngine.repetition_token(h, 1)
+    gs.repetitionSignature = chess_board.repetition_token(h, 1)
     return True
 
 def is_quiet(gs):
@@ -123,8 +123,8 @@ def is_quiet(gs):
     if is_square_attacked(gs.board, own_k, enemy):
         return False
 
-    static = sign * chessAI.score_board(gs)
-    q = chessAI.quiescence(gs, -chessAI.CHECKMATE, chessAI.CHECKMATE, sign)
+    static = sign * chess_engine.score_board(gs)
+    q = chess_engine.quiescence(gs, -chess_engine.CHECKMATE, chess_engine.CHECKMATE, sign)
     return abs(q - static) <= QUIET_DIFF
 
 def extract(gs, x):
@@ -137,7 +137,7 @@ def extract(gs, x):
         if pt != KING:
             sq64 = ((sq >> 4) << 3) | (sq & 7)
             x[(pt - 1) * 64 + sq64] += 1.0
-            v = chessAI.piece_value[pt]
+            v = chess_engine.piece_value[pt]
             mat += v
             if pt != PAWN:
                 npm += v
@@ -147,7 +147,7 @@ def extract(gs, x):
         if pt != KING:
             sq64 = ((7 - (sq >> 4)) << 3) | (sq & 7)
             x[(pt - 1) * 64 + sq64] -= 1.0
-            v = chessAI.piece_value[pt]
+            v = chess_engine.piece_value[pt]
             mat -= v
             if pt != PAWN:
                 npm += v
@@ -179,7 +179,7 @@ def main():
     limit = parse_limit(sys.argv[2]) if len(sys.argv) > 2 else 100_000
     tag = f"_{sys.argv[3]}" if len(sys.argv) > 3 else ""
 
-    gs = ChessEngine.GameState()
+    gs = chess_board.GameState()
     XtX = np.zeros((N_FEAT, N_FEAT), dtype=np.float64)
     Xtr = np.zeros(N_FEAT, dtype=np.float64)
     X_buf = np.zeros((BATCH, N_FEAT), dtype=np.float64)
@@ -249,7 +249,7 @@ def main():
     header = (
         f"# timestamp={timestamp} kept={kept} "
         f"ALPHA={ALPHA} CP_LIMIT={CP_LIMIT} QUIET_DIFF={QUIET_DIFF} MIN_DEPTH={MIN_DEPTH}\n"
-        f"# piece_value={chessAI.piece_value}\n"
+        f"# piece_value={chess_engine.piece_value}\n"
     )
 
     lines = [header]
