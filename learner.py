@@ -4,9 +4,9 @@ import sys
 import json
 import time
 import numpy as np
-import ChessEngine
-import chessAI
-from ChessEngine import (
+import chess_board
+import chess_engine
+from chess_board import (
     EMPTY, PAWN, KING, WHITE, BLACK, TYPE_MASK,
     wP, wN, wB, wR, wQ, wK, bP, bN, bB, bR, bQ, bK,
     WKS, BKS, WQS, BQS, is_square_attacked,
