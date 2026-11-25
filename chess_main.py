@@ -1,0 +1,490 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+# Frontend stuff
+
+from multiprocessing import Process, Queue
+import time
+
+from chess_board import (
+    BISHOP, BLACK, COLOR_MASK, EMPTY, KING, KNIGHT, QUEEN, ROOK, WHITE,
+    GameState, bB, bK, bN, bP, bQ, bR,
+    move_end, move_is_ep, move_piece, move_promo, move_start, move_to_san,
+    wB, wK, wN, wP, wQ, wR,
+)
+import chess_engine
+
+BOARD_SIZE = 1024
+LOG_PANEL_WIDTH = 336
+WINDOW_WIDTH = BOARD_SIZE + LOG_PANEL_WIDTH
+WINDOW_HEIGHT = BOARD_SIZE
+TILE_SIZE = BOARD_SIZE // 8
+FPS = 30
+ANIM_SECS = 0.16
+
+LIGHT_TILE = (255, 255, 255)
+DARK_TILE = (245, 220, 247)
+
+PROMOTION_CHOICES = (QUEEN, ROOK, BISHOP, KNIGHT)
+PIECE_FILENAMES = {
+    bR: "bR", bN: "bN", bB: "bB", bQ: "bQ", bK: "bK", bP: "bP",
+    wR: "wR", wN: "wN", wB: "wB", wQ: "wQ", wK: "wK", wP: "wP",
+}
+
+# Pre-game player selection layout
+MENU_PANEL = (132, 220, 760, 584)
+WHITE_HUMAN_BTN = (220, 440, 250, 82)
+WHITE_AI_BTN = (220, 540, 250, 82)
+BLACK_HUMAN_BTN = (554, 440, 250, 82)
+BLACK_AI_BTN = (554, 540, 250, 82)
+CONFIRM_BTN = (397, 680, 230, 76)
+
+
+def load_sprites(p):
+    sprites = {}
+    for piece_code, file_name in PIECE_FILENAMES.items():
+        raw = p.image.load(f"pieces/{file_name}.png").convert_alpha()
+        sprites[piece_code] = p.transform.scale(raw, (TILE_SIZE, TILE_SIZE))
+    return sprites
+
+def load_fonts(p):
+    return {
+        "log": p.font.SysFont("Arial", 32),
+        "menu_title": p.font.SysFont("Arial", 48, bold=True),
+        "menu_btn": p.font.SysFont("Arial", 28, bold=True),
+        "confirm": p.font.SysFont("Arial", 30, bold=True),
+        "banner": p.font.SysFont("Bebas Neue", 68, bold=True),
+    }
+
+def sq_to_xy(sq):
+    return (sq & 7) * TILE_SIZE, (sq >> 4) * TILE_SIZE
+
+def xy_to_sq(pos):
+    col = pos[0] // TILE_SIZE
+    row = pos[1] // TILE_SIZE
+    if 0 <= col < 8 and 0 <= row < 8:
+        return (row << 4) | col
+    return None
+
+def is_human_ply(ui):
+    return ui["human_white"] if ui["gs"].white_move else ui["human_black"]
+
+def kill_engine(ui):
+    proc = ui["ai_process"]
+    if proc is not None:
+        if proc.is_alive():
+            proc.terminate()
+            proc.join(timeout=0.1)
+        ui["ai_process"] = None
+        ui["ai_queue"] = None
+
+def deselect_sq(ui):
+    ui["selected_sq"] = None
+    ui["selected_moves"] = []
+
+def select_sq(ui, sq):
+    if sq is None:
+        deselect_sq(ui)
+        return
+
+    ally_mask = WHITE if ui["gs"].white_move else BLACK
+    if ui["gs"].board[sq] & ally_mask:
+        ui["selected_sq"] = sq
+        ui["selected_moves"] = [m for m in ui["legal_moves"] if move_start(m) == sq]
+    else:
+        deselect_sq(ui)
+
+def exec_ply(p, screen, clock, sprites, fonts, ui, move, animate=True):
+    gs = ui["gs"]
+    snapshot = render_board_snapshot(p, gs.board, sprites, exclude_sq=move_start(move)) if animate else None
+    gs.make_move(move)
+    if animate:
+        play_move_animation(p, screen, clock, sprites, fonts, ui, move, snapshot)
+
+    ui["legal_moves"] = gs.gen_legal_moves()
+    deselect_sq(ui)
+    ui["pending_promo"] = None
+    ui["ai_paused"] = False
+    ui["log_scroll"] = max_log_scroll(gs, fonts["log"])
+
+def reset_board(ui):
+    kill_engine(ui)
+    ui["gs"] = GameState()
+    ui["legal_moves"] = ui["gs"].gen_legal_moves()
+    deselect_sq(ui)
+    ui["pending_promo"] = None
+    ui["ai_paused"] = False
+    ui["log_scroll"] = 0
+
+def undo_ply(fonts, ui):
+    if ui["pending_promo"] is not None:
+        ui["pending_promo"] = None
+        deselect_sq(ui)
+        return
+
+    kill_engine(ui)
+    ui["gs"].undo_move()
+    ui["legal_moves"] = ui["gs"].gen_legal_moves()
+    deselect_sq(ui)
+    ui["ai_paused"] = True
+    ui["log_scroll"] = max_log_scroll(ui["gs"], fonts["log"])
+
+def handle_event(p, screen, clock, sprites, fonts, ui, event):
+    if event.type == p.QUIT:
+        ui["running"] = False
+        return
+
+    if event.type == p.MOUSEWHEEL and not ui["menu_open"]:
+        mx, _ = p.mouse.get_pos()
+        if mx >= BOARD_SIZE:
+            ui["log_scroll"] -= event.y * 60
+        return
+
+    if event.type == p.MOUSEBUTTONDOWN:
+        if not ui["menu_open"] and event.button in (4, 5):
+            if event.pos[0] >= BOARD_SIZE:
+                ui["log_scroll"] += -60 if event.button == 4 else 60
+            return
+
+        if event.button == 1:
+            on_lmb(p, screen, clock, sprites, fonts, ui, event.pos)
+        return
+
+    if event.type == p.KEYDOWN and not ui["menu_open"]:
+        if event.key == p.K_ESCAPE and ui["pending_promo"] is not None:
+            ui["pending_promo"] = None
+            deselect_sq(ui)
+        elif event.key == p.K_LEFT:
+            undo_ply(fonts, ui)
+        elif event.key == p.K_r:
+            reset_board(ui)
+        elif event.key == p.K_e:
+            print(ui["gs"].board)
+
+def on_lmb(p, screen, clock, sprites, fonts, ui, pos):
+    if ui["menu_open"]:
+        if p.Rect(WHITE_HUMAN_BTN).collidepoint(pos):
+            ui["human_white"] = True
+        elif p.Rect(WHITE_AI_BTN).collidepoint(pos):
+            ui["human_white"] = False
+
+        if p.Rect(BLACK_HUMAN_BTN).collidepoint(pos):
+            ui["human_black"] = True
+        elif p.Rect(BLACK_AI_BTN).collidepoint(pos):
+            ui["human_black"] = False
+
+        if p.Rect(CONFIRM_BTN).collidepoint(pos):
+            ui["menu_open"] = False
+            ui["ai_paused"] = False
+            deselect_sq(ui)
+        return
+
+    if ui["pending_promo"] is not None:
+        choice = pick_promotion_choice(p, pos, ui["pending_promo"])
+        if choice is not None:
+            src = move_start(ui["pending_promo"])
+            dst = move_end(ui["pending_promo"])
+            for move in ui["legal_moves"]:
+                if move_start(move) == src and move_end(move) == dst and move_promo(move) == choice:
+                    exec_ply(p, screen, clock, sprites, fonts, ui, move, animate=True)
+                    break
+        return
+
+    if ui["gs"].game_outcome is not None or not is_human_ply(ui):
+        return
+
+    clicked_sq = xy_to_sq(pos)
+    if clicked_sq is None or clicked_sq == ui["selected_sq"]:
+        deselect_sq(ui)
+        return
+
+    if ui["selected_sq"] is not None:
+        candidates = [m for m in ui["selected_moves"] if move_end(m) == clicked_sq]
+        if candidates:
+            if move_promo(candidates[0]):
+                ui["pending_promo"] = candidates[0]
+            else:
+                exec_ply(p, screen, clock, sprites, fonts, ui, candidates[0], animate=True)
+            return
+
+    select_sq(ui, clicked_sq)
+
+def poll_engine(p, screen, clock, sprites, fonts, ui):
+    if ui["menu_open"] or ui["gs"].game_outcome is not None or is_human_ply(ui) or ui["ai_paused"]:
+        return
+
+    if ui["ai_process"] is None:
+        q = Queue()
+        proc = Process(
+            target=chess_engine.find_best_move,
+            args=(ui["gs"], ui["legal_moves"], q),
+        )
+        proc.start()
+        ui["ai_queue"] = q
+        ui["ai_process"] = proc
+    elif not ui["ai_process"].is_alive():
+        q = ui["ai_queue"]
+        chosen = q.get() if not q.empty() else None
+        ui["ai_process"].join(timeout=0.05)
+        ui["ai_process"] = None
+        ui["ai_queue"] = None
+        if chosen is None and ui["legal_moves"]:
+            chosen = ui["legal_moves"][0]
+        if chosen is not None:
+            exec_ply(p, screen, clock, sprites, fonts, ui, chosen, animate=True)
+
+# RENDERING
+
+def draw_tiles(p, surface):
+    for idx in range(64):
+        row, col = divmod(idx, 8)
+        color = LIGHT_TILE if (row + col) % 2 == 0 else DARK_TILE
+        p.draw.rect(surface, color, (col * TILE_SIZE, row * TILE_SIZE, TILE_SIZE, TILE_SIZE))
+
+def draw_pieces(surface, board, sprites, exclude_sq=None):
+    for row in range(8):
+        rank_offset = row << 4
+        for col in range(8):
+            sq = rank_offset | col
+            if sq == exclude_sq:
+                continue
+            piece = board[sq]
+            if piece != EMPTY:
+                surface.blit(sprites[piece], (col * TILE_SIZE, row * TILE_SIZE))
+
+def render_board_snapshot(p, board, sprites, exclude_sq=None):
+    snapshot = p.Surface((BOARD_SIZE, BOARD_SIZE))
+    draw_tiles(p, snapshot)
+    draw_pieces(snapshot, board, sprites, exclude_sq=exclude_sq)
+    return snapshot
+
+def play_move_animation(p, screen, clock, sprites, fonts, ui, move, snapshot):
+    sx, sy = sq_to_xy(move_start(move))
+    ex, ey = sq_to_xy(move_end(move))
+    sprite = sprites[move_piece(move)]
+
+    t0 = time.perf_counter()
+    while True:
+        progress = min(1.0, (time.perf_counter() - t0) / ANIM_SECS)
+        eased = 1.0 - (1.0 - progress) ** 3
+        cx = sx + (ex - sx) * eased
+        cy = sy + (ey - sy) * eased
+
+        screen.blit(snapshot, (0, 0))
+        screen.blit(sprite, (cx, cy))
+        draw_move_log(p, screen, fonts["log"], ui)
+        p.display.flip()
+
+        if progress >= 1.0:
+            break
+        clock.tick(FPS)
+
+def draw_move_hints(p, screen, ui):
+    selected_sq = ui["selected_sq"]
+    if selected_sq is None:
+        return
+
+    overlay = p.Surface((BOARD_SIZE, BOARD_SIZE), p.SRCALPHA)
+
+    sx, sy = sq_to_xy(selected_sq)
+    p.draw.rect(overlay, (0, 0, 255, 75), (sx, sy, TILE_SIZE, TILE_SIZE))
+
+    board = ui["gs"].board
+    seen_targets = set()
+    for move in ui["selected_moves"]:
+        target_sq = move_end(move)
+        if target_sq in seen_targets:
+            continue
+        seen_targets.add(target_sq)
+
+        tx, ty = sq_to_xy(target_sq)
+        is_capture = board[target_sq] != EMPTY or move_is_ep(move)
+
+        color = (255, 0, 0, 75) if is_capture else (255, 255, 0, 75)
+        p.draw.rect(overlay, color, (tx, ty, TILE_SIZE, TILE_SIZE))
+
+    screen.blit(overlay, (0, 0))
+
+def promotion_rects(p, move):
+    step = 1 if (move_piece(move) & WHITE) else -1
+    dst = move_end(move)
+    end_row, end_col = dst >> 4, dst & 7
+    return [
+        (piece, p.Rect(end_col * TILE_SIZE, (end_row + i * step) * TILE_SIZE, TILE_SIZE, TILE_SIZE))
+        for i, piece in enumerate(PROMOTION_CHOICES)
+    ]
+
+def pick_promotion_choice(p, pos, move):
+    for piece, rect in promotion_rects(p, move):
+        if rect.collidepoint(pos):
+            return piece
+    return None
+
+def draw_promotion_overlay(p, screen, sprites, move):
+    dim = p.Surface((BOARD_SIZE, BOARD_SIZE), p.SRCALPHA)
+    dim.fill((0, 0, 0, 120))
+    screen.blit(dim, (0, 0))
+
+    side = move_piece(move) & COLOR_MASK
+    cursor = p.mouse.get_pos()
+
+    for piece, rect in promotion_rects(p, move):
+        hovered = rect.collidepoint(cursor)
+        fill = (92, 145, 112) if hovered else (240, 240, 245)
+        border = (190, 235, 198) if hovered else (54, 59, 69)
+        p.draw.rect(screen, fill, rect)
+        p.draw.rect(screen, border, rect, 3)
+        screen.blit(sprites[side | piece], rect)
+
+def draw_toggle_btn(p, screen, font, bounds, caption, active):
+    rect = p.Rect(bounds)
+    fill = (92, 145, 112) if active else (54, 59, 69)
+    border = (190, 235, 198) if active else (125, 130, 140)
+    p.draw.rect(screen, fill, rect)
+    p.draw.rect(screen, border, rect, 4 if active else 2)
+    text = font.render(caption, True, (255, 255, 255))
+    screen.blit(text, text.get_rect(center=rect.center))
+
+def draw_menu_overlay(p, screen, sprites, fonts, ui):
+    dim = p.Surface((BOARD_SIZE, BOARD_SIZE), p.SRCALPHA)
+    dim.fill((0, 0, 0, 155))
+    screen.blit(dim, (0, 0))
+
+    panel = p.Rect(MENU_PANEL)
+    p.draw.rect(screen, (35, 38, 46), panel)
+    p.draw.rect(screen, (205, 205, 215), panel, 3)
+
+    title = fonts["menu_title"].render("Choose players", True, (255, 255, 255))
+    screen.blit(title, title.get_rect(center=(BOARD_SIZE // 2, 285)))
+
+    white_icon = p.transform.smoothscale(sprites[wK], (96, 96))
+    black_icon = p.transform.smoothscale(sprites[bK], (96, 96))
+    screen.blit(white_icon, white_icon.get_rect(center=(345, 365)))
+    screen.blit(black_icon, black_icon.get_rect(center=(679, 365)))
+
+    draw_toggle_btn(p, screen, fonts["menu_btn"], WHITE_HUMAN_BTN, "HUMAN", ui["human_white"])
+    draw_toggle_btn(p, screen, fonts["menu_btn"], WHITE_AI_BTN, "AI", not ui["human_white"])
+    draw_toggle_btn(p, screen, fonts["menu_btn"], BLACK_HUMAN_BTN, "HUMAN", ui["human_black"])
+    draw_toggle_btn(p, screen, fonts["menu_btn"], BLACK_AI_BTN, "AI", not ui["human_black"])
+
+    confirm = p.Rect(CONFIRM_BTN)
+    p.draw.rect(screen, (75, 105, 155), confirm)
+    p.draw.rect(screen, (190, 210, 245), confirm, 3)
+    label = fonts["confirm"].render("CONFIRM", True, (255, 255, 255))
+    screen.blit(label, label.get_rect(center=confirm.center))
+
+def max_log_scroll(gs, log_font):
+    pair_count = (len(gs.move_log) + 1) // 2
+    padding = 10
+    row_height = log_font.get_linesize() + 4
+    viewport_h = WINDOW_HEIGHT - 2 * padding
+    return max(0, pair_count * row_height - viewport_h)
+
+def draw_move_log(p, screen, log_font, ui):
+    panel = p.Rect(BOARD_SIZE, 0, LOG_PANEL_WIDTH, WINDOW_HEIGHT)
+    p.draw.rect(screen, (0, 0, 0), panel)
+
+    moves = ui["gs"].move_log
+    rows = [
+        f"{i // 2 + 1}. {move_to_san(moves[i])}"
+        + (f" {move_to_san(moves[i + 1])}" if i + 1 < len(moves) else "")
+        for i in range(0, len(moves), 2)
+    ]
+
+    padding = 10
+    bar_w = 10
+    row_h = log_font.get_linesize() + 4
+    viewport_h = WINDOW_HEIGHT - 2 * padding
+    content_h = len(rows) * row_h
+    max_scroll = max(0, content_h - viewport_h)
+    ui["log_scroll"] = max(0, min(ui["log_scroll"], max_scroll))
+
+    text_w = LOG_PANEL_WIDTH - 2 * padding - (bar_w + 6 if max_scroll > 0 else 0)
+    clip_rect = p.Rect(BOARD_SIZE + padding, padding, text_w, viewport_h)
+
+    prev_clip = screen.get_clip()
+    screen.set_clip(clip_rect)
+    for idx, line in enumerate(rows):
+        surf = log_font.render(line, True, (255, 255, 255))
+        screen.blit(surf, (BOARD_SIZE + padding, padding + idx * row_h - ui["log_scroll"]))
+    screen.set_clip(prev_clip)
+
+    if max_scroll > 0:
+        track = p.Rect(BOARD_SIZE + LOG_PANEL_WIDTH - padding - bar_w, padding, bar_w, viewport_h)
+        p.draw.rect(screen, (65, 65, 65), track, border_radius=5)
+
+        thumb_h = max(35, int(viewport_h * viewport_h / content_h))
+        thumb_y = padding + int((ui["log_scroll"] / max_scroll) * (viewport_h - thumb_h))
+        p.draw.rect(screen, (190, 190, 190), (track.x, thumb_y, bar_w, thumb_h), border_radius=5)
+
+def draw_outcome_banner(p, screen, banner_font, message):
+    label = banner_font.render(message, True, (255, 255, 255))
+    box_w = max(460, label.get_width() + 80)
+    box_h = label.get_height() + 48
+    box = p.Rect(0, 0, box_w, box_h)
+    box.center = (BOARD_SIZE // 2, BOARD_SIZE // 2)
+
+    card = p.Surface((box_w, box_h), p.SRCALPHA)
+    card.fill((28, 31, 38, 225))
+    screen.blit(card, box.topleft)
+    p.draw.rect(screen, (205, 205, 215), box, 3)
+    screen.blit(label, label.get_rect(center=box.center))
+
+def render_frame(p, screen, sprites, fonts, ui):
+    draw_tiles(p, screen)
+    draw_move_hints(p, screen, ui)
+    draw_pieces(screen, ui["gs"].board, sprites)
+    draw_move_log(p, screen, fonts["log"], ui)
+
+    if ui["pending_promo"] is not None:
+        draw_promotion_overlay(p, screen, sprites, ui["pending_promo"])
+    if ui["menu_open"]:
+        draw_menu_overlay(p, screen, sprites, fonts, ui)
+
+    outcome = ui["gs"].game_outcome
+    if outcome is not None:
+        draw_outcome_banner(p, screen, fonts["banner"], outcome)
+
+    p.display.flip()
+
+def main():
+    import pygame as p
+
+    p.init()
+    screen = p.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
+    p.display.set_caption("Szachy z Marcinkiem")
+    p.display.set_icon(p.image.load("pieces/bK.png"))
+    clock = p.time.Clock()
+
+    sprites = load_sprites(p)
+    fonts = load_fonts(p)
+    gs = GameState()
+
+    ui = {
+        "gs": gs,
+        "legal_moves": gs.gen_legal_moves(),
+        "human_white": True,
+        "human_black": False,
+        "menu_open": True,
+        "selected_sq": None,
+        "selected_moves": [],
+        "pending_promo": None,
+        "log_scroll": 0,
+        "ai_process": None,
+        "ai_queue": None,
+        "ai_paused": False,
+        "running": True,
+    }
+
+    while ui["running"]:
+        for event in p.event.get():
+            handle_event(p, screen, clock, sprites, fonts, ui, event)
+
+        poll_engine(p, screen, clock, sprites, fonts, ui)
+        render_frame(p, screen, sprites, fonts, ui)
+        clock.tick(FPS)
+
+    kill_engine(ui)
+    p.quit()
+
+if __name__ == "__main__":
+    main()
