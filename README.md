@@ -48,6 +48,7 @@ python3 chess_main.py
 | **Left Click** | Select piece / make move / choose promotion piece |
 | **Mouse Wheel** (over right panel) | Scroll algebraic notation move log |
 | **`Left Arrow`** | Undo last ply |
+| **`SPACE`** | Pause / resume the engine |
 | **`R`** | Reset the board |
 | **`Esc`** | Cancel pending pawn promotion |
 | **`E`** | Print raw 0x88 board array to console |
