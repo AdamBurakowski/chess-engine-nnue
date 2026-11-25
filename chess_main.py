@@ -68,14 +68,45 @@ def xy_to_sq(pos):
 def is_human_ply(ui):
     return ui["human_white"] if ui["gs"].white_move else ui["human_black"]
 
-def kill_engine(ui):
-    proc = ui["ai_process"]
+def engine_worker(task_q, res_q):
+    while True:
+        job = task_q.get()
+        if job is None:
+            break
+        job_id, gs, legal_moves = job
+        best_move = chess_engine.find_best_move(gs, legal_moves)
+        res_q.put((job_id, best_move))
+
+
+def start_engine(ui):
+    if ui["engine_process"] is not None and ui["engine_process"].is_alive():
+        return
+    task_q = Queue()
+    res_q = Queue()
+    proc = Process(target=engine_worker, args=(task_q, res_q), daemon=True)
+    proc.start()
+    ui["engine_process"] = proc
+    ui["engine_task_q"] = task_q
+    ui["engine_res_q"] = res_q
+    ui["engine_busy"] = False
+
+
+def kill_engine(ui, restart=False):
+    proc = ui["engine_process"]
     if proc is not None:
         if proc.is_alive():
-            proc.terminate()
+            if ui["engine_busy"]:
+                proc.terminate()
+            else:
+                ui["engine_task_q"].put(None)
             proc.join(timeout=0.1)
-        ui["ai_process"] = None
-        ui["ai_queue"] = None
+        ui["engine_process"] = None
+        ui["engine_task_q"] = None
+        ui["engine_res_q"] = None
+        ui["engine_busy"] = False
+
+    if restart:
+        start_engine(ui)
 
 def deselect_sq(ui):
     ui["selected_sq"] = None
@@ -103,16 +134,16 @@ def exec_ply(p, screen, clock, sprites, fonts, ui, move, animate=True):
     ui["legal_moves"] = gs.gen_legal_moves()
     deselect_sq(ui)
     ui["pending_promo"] = None
-    ui["ai_paused"] = False
+    ui["engine_paused"] = False
     ui["log_scroll"] = max_log_scroll(gs, fonts["log"])
 
 def reset_board(ui):
-    kill_engine(ui)
+    kill_engine(ui, restart=True)
     ui["gs"] = GameState()
     ui["legal_moves"] = ui["gs"].gen_legal_moves()
     deselect_sq(ui)
     ui["pending_promo"] = None
-    ui["ai_paused"] = False
+    ui["engine_paused"] = False
     ui["log_scroll"] = 0
 
 def undo_ply(fonts, ui):
@@ -121,11 +152,14 @@ def undo_ply(fonts, ui):
         deselect_sq(ui)
         return
 
-    kill_engine(ui)
+    if not ui["gs"].move_log:
+        return
+
+    kill_engine(ui, restart=True)
     ui["gs"].undo_move()
     ui["legal_moves"] = ui["gs"].gen_legal_moves()
     deselect_sq(ui)
-    ui["ai_paused"] = True
+    ui["engine_paused"] = not is_human_ply(ui)
     ui["log_scroll"] = max_log_scroll(ui["gs"], fonts["log"])
 
 def handle_event(p, screen, clock, sprites, fonts, ui, event):
@@ -155,6 +189,8 @@ def handle_event(p, screen, clock, sprites, fonts, ui, event):
             deselect_sq(ui)
         elif event.key == p.K_LEFT:
             undo_ply(fonts, ui)
+        elif event.key == p.K_SPACE and not is_human_ply(ui):
+            ui["engine_paused"] = not ui["engine_paused"]
         elif event.key == p.K_r:
             reset_board(ui)
         elif event.key == p.K_e:
@@ -174,12 +210,12 @@ def on_lmb(p, screen, clock, sprites, fonts, ui, pos):
 
         if p.Rect(CONFIRM_BTN).collidepoint(pos):
             ui["menu_open"] = False
-            ui["ai_paused"] = False
+            ui["engine_paused"] = False
             deselect_sq(ui)
         return
 
     if ui["pending_promo"] is not None:
-        choice = pick_promotion_choice(p, pos, ui["pending_promo"])
+        choice = pick_promo_choice(p, pos, ui["pending_promo"])
         if choice is not None:
             src = move_start(ui["pending_promo"])
             dst = move_end(ui["pending_promo"])
@@ -209,28 +245,30 @@ def on_lmb(p, screen, clock, sprites, fonts, ui, pos):
     select_sq(ui, clicked_sq)
 
 def poll_engine(p, screen, clock, sprites, fonts, ui):
-    if ui["menu_open"] or ui["gs"].game_outcome is not None or is_human_ply(ui) or ui["ai_paused"]:
+    if ui["menu_open"] or ui["gs"].game_outcome is not None or is_human_ply(ui) or ui["engine_paused"]:
         return
 
-    if ui["ai_process"] is None:
-        q = Queue()
-        proc = Process(
-            target=chess_engine.find_best_move,
-            args=(ui["gs"], ui["legal_moves"], q),
-        )
-        proc.start()
-        ui["ai_queue"] = q
-        ui["ai_process"] = proc
-    elif not ui["ai_process"].is_alive():
-        q = ui["ai_queue"]
-        chosen = q.get() if not q.empty() else None
-        ui["ai_process"].join(timeout=0.05)
-        ui["ai_process"] = None
-        ui["ai_queue"] = None
-        if chosen is None and ui["legal_moves"]:
-            chosen = ui["legal_moves"][0]
-        if chosen is not None:
-            exec_ply(p, screen, clock, sprites, fonts, ui, chosen, animate=True)
+    if ui["engine_process"] is None or not ui["engine_process"].is_alive():
+        start_engine(ui)
+
+    if not ui["engine_busy"]:
+        ui["engine_job_id"] += 1
+        ui["engine_busy"] = True
+        ui["engine_task_q"].put((ui["engine_job_id"], ui["gs"], ui["legal_moves"]))
+        return
+
+    if ui["engine_res_q"].empty():
+        return
+    job_id, chosen = ui["engine_res_q"].get()
+
+    ui["engine_busy"] = False
+    if job_id != ui["engine_job_id"]:
+        return
+
+    if chosen is None and ui["legal_moves"]:
+        chosen = ui["legal_moves"][0]
+    if chosen is not None:
+        exec_ply(p, screen, clock, sprites, fonts, ui, chosen, animate=True)
 
 # RENDERING
 
@@ -304,7 +342,7 @@ def draw_move_hints(p, screen, ui):
 
     screen.blit(overlay, (0, 0))
 
-def promotion_rects(p, move):
+def promo_rects(p, move):
     step = 1 if (move_piece(move) & WHITE) else -1
     dst = move_end(move)
     end_row, end_col = dst >> 4, dst & 7
@@ -313,13 +351,13 @@ def promotion_rects(p, move):
         for i, piece in enumerate(PROMOTION_CHOICES)
     ]
 
-def pick_promotion_choice(p, pos, move):
-    for piece, rect in promotion_rects(p, move):
+def pick_promo_choice(p, pos, move):
+    for piece, rect in promo_rects(p, move):
         if rect.collidepoint(pos):
             return piece
     return None
 
-def draw_promotion_overlay(p, screen, sprites, move):
+def draw_promo_overlay(p, screen, sprites, move):
     dim = p.Surface((BOARD_SIZE, BOARD_SIZE), p.SRCALPHA)
     dim.fill((0, 0, 0, 120))
     screen.blit(dim, (0, 0))
@@ -327,7 +365,7 @@ def draw_promotion_overlay(p, screen, sprites, move):
     side = move_piece(move) & COLOR_MASK
     cursor = p.mouse.get_pos()
 
-    for piece, rect in promotion_rects(p, move):
+    for piece, rect in promo_rects(p, move):
         hovered = rect.collidepoint(cursor)
         fill = (92, 145, 112) if hovered else (240, 240, 245)
         border = (190, 235, 198) if hovered else (54, 59, 69)
@@ -436,7 +474,7 @@ def render_frame(p, screen, sprites, fonts, ui):
     draw_move_log(p, screen, fonts["log"], ui)
 
     if ui["pending_promo"] is not None:
-        draw_promotion_overlay(p, screen, sprites, ui["pending_promo"])
+        draw_promo_overlay(p, screen, sprites, ui["pending_promo"])
     if ui["menu_open"]:
         draw_menu_overlay(p, screen, sprites, fonts, ui)
 
@@ -469,9 +507,12 @@ def main():
         "selected_moves": [],
         "pending_promo": None,
         "log_scroll": 0,
-        "ai_process": None,
-        "ai_queue": None,
-        "ai_paused": False,
+        "engine_process": None,
+        "engine_task_q": None,
+        "engine_res_q": None,
+        "engine_busy": False,
+        "engine_job_id": 0,
+        "engine_paused": False,
         "running": True,
     }
 
@@ -483,7 +524,7 @@ def main():
         render_frame(p, screen, sprites, fonts, ui)
         clock.tick(FPS)
 
-    kill_engine(ui)
+    kill_engine(ui, restart=False)
     p.quit()
 
 if __name__ == "__main__":
