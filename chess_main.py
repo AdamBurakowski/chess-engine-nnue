@@ -24,6 +24,11 @@ ANIM_SECS = 0.16
 LIGHT_TILE = (255, 255, 255)
 DARK_TILE = (245, 220, 247)
 
+SELECTED_TILE = (0, 0, 255, 75)
+HOVER_TILE = (0, 0, 255, 40)
+MOVE_INDICATOR = (0, 0, 192, 75)
+LAST_MOVE_TILE = (106, 106, 255, 75)
+
 PROMOTION_CHOICES = (QUEEN, ROOK, BISHOP, KNIGHT)
 PIECE_FILENAMES = {
     bR: "bR", bN: "bN", bB: "bB", bQ: "bQ", bK: "bK", bP: "bP",
@@ -126,7 +131,7 @@ def select_sq(ui, sq):
 
 def exec_ply(p, screen, clock, sprites, fonts, ui, move, animate=True):
     gs = ui["gs"]
-    snapshot = render_board_snapshot(p, gs.board, sprites, exclude_sq=move_start(move)) if animate else None
+    snapshot = render_board_snapshot(p, gs.board, sprites, exclude_sq=move_start(move), highlight_move=move) if animate else None
     gs.make_move(move)
     if animate:
         play_move_animation(p, screen, clock, sprites, fonts, ui, move, snapshot)
@@ -289,9 +294,11 @@ def draw_pieces(surface, board, sprites, exclude_sq=None):
             if piece != EMPTY:
                 surface.blit(sprites[piece], (col * TILE_SIZE, row * TILE_SIZE))
 
-def render_board_snapshot(p, board, sprites, exclude_sq=None):
+def render_board_snapshot(p, board, sprites, exclude_sq=None, highlight_move=None):
     snapshot = p.Surface((BOARD_SIZE, BOARD_SIZE))
     draw_tiles(p, snapshot)
+    if highlight_move is not None:
+        draw_move_squares(p, snapshot, highlight_move)
     draw_pieces(snapshot, board, sprites, exclude_sq=exclude_sq)
     return snapshot
 
@@ -316,6 +323,16 @@ def play_move_animation(p, screen, clock, sprites, fonts, ui, move, snapshot):
             break
         clock.tick(FPS)
 
+def draw_move_squares(p, surface, move):
+    tile = p.Surface((TILE_SIZE, TILE_SIZE), p.SRCALPHA)
+    tile.fill(LAST_MOVE_TILE)
+    for sq in (move_start(move), move_end(move)):
+        surface.blit(tile, sq_to_xy(sq))
+
+def draw_last_move(p, screen, ui):
+    if ui["gs"].move_log:
+        draw_move_squares(p, screen, ui["gs"].move_log[-1])
+
 def draw_move_hints(p, screen, ui):
     selected_sq = ui["selected_sq"]
     if selected_sq is None:
@@ -324,9 +341,13 @@ def draw_move_hints(p, screen, ui):
     overlay = p.Surface((BOARD_SIZE, BOARD_SIZE), p.SRCALPHA)
 
     sx, sy = sq_to_xy(selected_sq)
-    p.draw.rect(overlay, (0, 0, 255, 75), (sx, sy, TILE_SIZE, TILE_SIZE))
+    p.draw.rect(overlay, SELECTED_TILE, (sx, sy, TILE_SIZE, TILE_SIZE))
 
+    mx, my = p.mouse.get_pos()
     board = ui["gs"].board
+    corner = int(TILE_SIZE * 0.23)
+    dot_radius = int(TILE_SIZE * 0.13)
+
     seen_targets = set()
     for move in ui["selected_moves"]:
         target_sq = move_end(move)
@@ -335,10 +356,26 @@ def draw_move_hints(p, screen, ui):
         seen_targets.add(target_sq)
 
         tx, ty = sq_to_xy(target_sq)
-        is_capture = board[target_sq] != EMPTY or move_is_ep(move)
+        is_hovered = tx <= mx < tx + TILE_SIZE and ty <= my < ty + TILE_SIZE
 
-        color = (255, 0, 0, 75) if is_capture else (255, 255, 0, 75)
-        p.draw.rect(overlay, color, (tx, ty, TILE_SIZE, TILE_SIZE))
+        if is_hovered:
+            p.draw.rect(overlay, HOVER_TILE, (tx, ty, TILE_SIZE, TILE_SIZE))
+            continue
+
+        is_capture = board[target_sq] != EMPTY or move_is_ep(move)
+        if is_capture:
+            right, bottom = tx + TILE_SIZE, ty + TILE_SIZE
+            triangles = [
+                [(tx, ty), (tx + corner, ty), (tx, ty + corner)],
+                [(right, ty), (right - corner, ty), (right, ty + corner)],
+                [(tx, bottom), (tx + corner, bottom), (tx, bottom - corner)],
+                [(right, bottom), (right - corner, bottom), (right, bottom - corner)],
+            ]
+            for triangle in triangles:
+                p.draw.polygon(overlay, MOVE_INDICATOR, triangle)
+        else:
+            center = (tx + TILE_SIZE // 2, ty + TILE_SIZE // 2)
+            p.draw.circle(overlay, MOVE_INDICATOR, center, dot_radius)
 
     screen.blit(overlay, (0, 0))
 
@@ -469,6 +506,7 @@ def draw_outcome_banner(p, screen, banner_font, message):
 
 def render_frame(p, screen, sprites, fonts, ui):
     draw_tiles(p, screen)
+    draw_last_move(p, screen, ui)
     draw_move_hints(p, screen, ui)
     draw_pieces(screen, ui["gs"].board, sprites)
     draw_move_log(p, screen, fonts["log"], ui)
