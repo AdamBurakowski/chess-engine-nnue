@@ -53,397 +53,422 @@ def repetition_token(position_hash, count):
     return x
 
 
-class GameState():
-    def __init__(self):
-        self.board = [
-            bR, bN, bB, bQ, bK, bB, bN, bR,  0, 0, 0, 0, 0, 0, 0, 0,
-            bP, bP, bP, bP, bP, bP, bP, bP,  0, 0, 0, 0, 0, 0, 0, 0,
-             0,  0,  0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0,
-             0,  0,  0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0,
-             0,  0,  0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0,
-             0,  0,  0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0,
-            wP, wP, wP, wP, wP, wP, wP, wP,  0, 0, 0, 0, 0, 0, 0, 0,
-            wR, wN, wB, wQ, wK, wB, wN, wR,  0, 0, 0, 0, 0, 0, 0, 0]
+def create_game_state():
+    board = [
+        bR, bN, bB, bQ, bK, bB, bN, bR,  0, 0, 0, 0, 0, 0, 0, 0,
+        bP, bP, bP, bP, bP, bP, bP, bP,  0, 0, 0, 0, 0, 0, 0, 0,
+         0,  0,  0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0,
+         0,  0,  0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0,
+         0,  0,  0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0,
+         0,  0,  0,  0,  0,  0,  0,  0,  0, 0, 0, 0, 0, 0, 0, 0,
+        wP, wP, wP, wP, wP, wP, wP, wP,  0, 0, 0, 0, 0, 0, 0, 0,
+        wR, wN, wB, wQ, wK, wB, wN, wR,  0, 0, 0, 0, 0, 0, 0, 0]
 
-        self.white_pieces = {
+    gs = {
+        "board": board,
+        "white_pieces": {
             (row << 4) | col
             for row in range(8)
             for col in range(8)
-            if self.board[row << 4 | col] & WHITE
-        }
-
-        self.black_pieces = {
+            if board[(row << 4) | col] & WHITE
+        },
+        "black_pieces": {
             (row << 4) | col
             for row in range(8)
             for col in range(8)
-            if self.board[row << 4 | col] & BLACK
-        }
+            if board[(row << 4) | col] & BLACK
+        },
+        "white_move": True,
+        "move_log": [],
+        "wk_pos": 0x74,
+        "bk_pos": 0x04,
+        "checkmate": False,
+        "stalemate": False,
+        "in_check": False,
+        "en_passant_possible": -1,
+        "en_passant_possible_log": [-1],
+        "castling_rights": CASTLING_RIGHTS,
+        "castling_rights_log": [CASTLING_RIGHTS],
+        "state_log": [],
+        "half_move_clock": 0,
+        "zobrist_hash": 0,
+        "position_history": [],
+        "repetition_counts": {},
+        "repetition_signature": 0,
+    }
 
-        self.white_move = True
-        self.move_log = []
-        self.wk_pos = 0x74
-        self.bk_pos = 0x04
-        self.checkmate = False
-        self.stalemate = False
-        self.in_check = False
-        self.en_passant_possible = -1
-        self.en_passant_possible_log = [-1]
-        self.castling_rights = CASTLING_RIGHTS
-        self.castling_rights_log = [self.castling_rights]
-        self.stateLog = []
+    # Zobrist Hash
+    zobrist_hash = compute_zobrist_hash(gs)
+    gs["zobrist_hash"] = zobrist_hash
+    gs["position_history"] = [zobrist_hash]
+    gs["repetition_counts"] = {zobrist_hash: 1}
+    gs["repetition_signature"] = repetition_token(zobrist_hash, 1)
+    return gs
 
-        self.half_move_clock = 0
 
-        # Zobrist Hash
-        self.zobristHash = self.compute_zobrist_hash()
-        self.positionHistory = [self.zobristHash]
-        self.repetitionCounts = {
-            self.zobristHash: 1
-        }
-        self.repetitionSignature = repetition_token(
-            self.zobristHash, 1
+def verify_zobrist_hash(gs):
+    calculated = compute_zobrist_hash(gs)
+
+    if calculated != gs["zobrist_hash"]:
+        raise AssertionError(
+            f"Zobrist mismatch: "
+            f"stored={gs['zobrist_hash']:#018x}, "
+            f"calculated={calculated:#018x}"
         )
 
-    def verify_zobrist_hash(self):
-        calculated = self.compute_zobrist_hash()
 
-        if calculated != self.zobristHash:
-            raise AssertionError(
-                f"Zobrist mismatch: "
-                f"stored={self.zobristHash:#018x}, "
-                f"calculated={calculated:#018x}"
-            )
+def compute_zobrist_hash(gs):
+    """
+    Full recomputation. Used for initialization and debugging,
+    NOT during normal search.
+    """
+    board = gs["board"]
+    h = 0
+    for row in range(8):
+        for col in range(8):
+            sq = (row << 4) | col
+            piece = board[sq]
+            if piece:
+                h ^= ZOBRIST_PIECES[piece][sq]
+    if not gs["white_move"]:
+        h ^= ZOBRIST_SIDE
+    h ^= ZOBRIST_CASTLING[gs["castling_rights"]]
+    if gs["en_passant_possible"] != -1:
+        h ^= ZOBRIST_EP[gs["en_passant_possible"] & 7]
+    return h
 
-    def compute_zobrist_hash(self):
-        """
-        Full recomputation. Used for initialization and debugging,
-        NOT during normal search.
-        """
-        h = 0
-        for row in range(8):
-            for col in range(8):
-                sq = row << 4 | col
-                piece = self.board[sq]
-                if piece:
-                    h ^= ZOBRIST_PIECES[piece][sq]
-        if not self.white_move:
-            h ^= ZOBRIST_SIDE
-        h ^= ZOBRIST_CASTLING[self.castling_rights]
-        if self.en_passant_possible != -1:
-            h ^= ZOBRIST_EP[self.en_passant_possible & 7]
-        return h
 
-    def get_position_key(self):
-        return self.zobristHash
+def get_position_key(gs):
+    return gs["zobrist_hash"]
 
-    def get_search_key(self):
-        return (
-            self.zobristHash,
-            self.repetitionSignature,
-            min(self.half_move_clock, 100)
+
+def get_search_key(gs):
+    return (
+        gs["zobrist_hash"],
+        gs["repetition_signature"],
+        min(gs["half_move_clock"], 100),
+    )
+
+
+def is_threefold_repetition(gs):
+    return gs["repetition_counts"].get(gs["zobrist_hash"], 0) >= 3
+
+
+def update_repetition_history(gs, position_hash):
+    rep_counts = gs["repetition_counts"]
+    old_count = rep_counts.get(position_hash, 0)
+    new_count = old_count + 1
+    if old_count:
+        gs["repetition_signature"] ^= repetition_token(
+            position_hash, min(old_count, 2)
         )
+    gs["repetition_signature"] ^= repetition_token(
+        position_hash, min(new_count, 2)
+    )
+    rep_counts[position_hash] = new_count
 
-    def is_threefold_repetition(self):
-        return self.repetitionCounts.get(self.zobristHash, 0) >= 3
 
-    def update_repetition_history(self, position_hash):
-        old_count = self.repetitionCounts.get(position_hash, 0)
-        new_count = old_count + 1
-        if old_count:
-            self.repetitionSignature ^= repetition_token(
-                position_hash, min(old_count, 2))
-        self.repetitionSignature ^= repetition_token(
-            position_hash, min(new_count, 2))
-        self.repetitionCounts[position_hash] = new_count
+def get_game_outcome(gs):
+    if gs["checkmate"]:
+        return "Black wins by checkmate" if gs["white_move"] else "White wins by checkmate"
+    if gs["stalemate"]:
+        return "Stalemate"
+    if is_threefold_repetition(gs):
+        return "Draw by threefold repetition"
+    if gs["half_move_clock"] >= 100:
+        return "Draw by fifty-move rule"
+    return None
 
-    @property
-    def game_outcome(self):
-        if self.checkmate:
-            return "Black wins by checkmate" if self.white_move else "White wins by checkmate"
-        if self.stalemate:
-            return "Stalemate"
-        if self.is_threefold_repetition():
-            return "Draw by threefold repetition"
-        if self.half_move_clock >= 100:
-            return "Draw by fifty-move rule"
-        return None
 
-    def make_move(self, move):
-        self.stateLog.append((
-            self.zobristHash,
-            self.repetitionSignature,
-            self.half_move_clock
-        ))
+def make_move(gs, move):
+    board = gs["board"]
+    gs["state_log"].append((
+        gs["zobrist_hash"],
+        gs["repetition_signature"],
+        gs["half_move_clock"],
+    ))
 
-        old_castling_rights = self.castling_rights
-        old_enpassant = self.en_passant_possible
-        old_white_move = self.white_move
+    old_castling_rights = gs["castling_rights"]
+    old_enpassant = gs["en_passant_possible"]
+    old_white_move = gs["white_move"]
+
+    start_sq = move & 0x7F
+    end_sq = (move >> 7) & 0x7F
+    piece_moved = (move >> 14) & 0x1F
+    piece_captured = (move >> 19) & 0x1F
+    promo = (move >> 24) & 0x7
+    is_ep = (move >> 27) & 1
+    is_castle = (move >> 28) & 1
+
+    changed_squares = {start_sq, end_sq}
+
+    if is_ep:
+        changed_squares.add((start_sq & 0x70) | (end_sq & 7))
+
+    if is_castle:
+        if end_sq - start_sq == 2:
+            changed_squares.add(end_sq + 1)
+            changed_squares.add(end_sq - 1)
+        else:
+            changed_squares.add(end_sq - 2)
+            changed_squares.add(end_sq + 1)
+
+    old_square_contents = {
+        square: board[square] for square in changed_squares
+    }
+
+    # MOVE LOGIC
+    board[start_sq] = EMPTY
+    board[end_sq] = piece_moved
+
+    moving_pieces = gs["white_pieces"] if piece_moved & WHITE else gs["black_pieces"]
+    moving_pieces.remove(start_sq)
+    moving_pieces.add(end_sq)
+
+    if piece_captured and not is_ep:
+        captured_pieces = gs["white_pieces"] if piece_captured & WHITE else gs["black_pieces"]
+        captured_pieces.remove(end_sq)
+
+    gs["move_log"].append(move)
+
+    if (piece_moved & TYPE_MASK) == PAWN or piece_captured:
+        gs["half_move_clock"] = 0
+    else:
+        gs["half_move_clock"] += 1
+
+    gs["white_move"] = not gs["white_move"]
+
+    if piece_moved == wK:
+        gs["wk_pos"] = end_sq
+    elif piece_moved == bK:
+        gs["bk_pos"] = end_sq
+
+    if promo:
+        board[end_sq] = (piece_moved & COLOR_MASK) | promo
+
+    # En passant
+    if is_ep:
+        ep_cp_sq = (start_sq & 0x70) | (end_sq & 7)
+        board[ep_cp_sq] = EMPTY
+        captured_pieces = gs["white_pieces"] if piece_captured & WHITE else gs["black_pieces"]
+        captured_pieces.remove(ep_cp_sq)
+
+    # Update en passant target
+    if (piece_moved & TYPE_MASK) == PAWN and abs(start_sq - end_sq) == 32:
+        gs["en_passant_possible"] = (start_sq + end_sq) >> 1
+    else:
+        gs["en_passant_possible"] = -1
+
+    gs["en_passant_possible_log"].append(gs["en_passant_possible"])
+
+    if is_castle:
+        if end_sq - start_sq == 2:
+            # Kingside
+            rook_start, rook_end = end_sq + 1, end_sq - 1
+        else:
+            # Queenside
+            rook_start, rook_end = end_sq - 2, end_sq + 1
+
+        board[rook_end] = board[rook_start]
+        board[rook_start] = EMPTY
+        moving_pieces.remove(rook_start)
+        moving_pieces.add(rook_end)
+
+    # Update castling rights
+    update_castling_rights(gs, move)
+    gs["castling_rights_log"].append(gs["castling_rights"])
+
+    # ZOBRIST HASH UPDATE
+    zobrist = gs["zobrist_hash"]
+    zobrist ^= ZOBRIST_CASTLING[old_castling_rights]
+    if old_enpassant != -1:
+        zobrist ^= ZOBRIST_EP[old_enpassant & 7]
+    if not old_white_move:
+        zobrist ^= ZOBRIST_SIDE
+
+    for sq, old_piece in old_square_contents.items():
+        zobrist ^= ZOBRIST_PIECES[old_piece][sq]
+        zobrist ^= ZOBRIST_PIECES[board[sq]][sq]
+
+    zobrist ^= ZOBRIST_CASTLING[gs["castling_rights"]]
+    if gs["en_passant_possible"] != -1:
+        zobrist ^= ZOBRIST_EP[gs["en_passant_possible"] & 7]
+    if not gs["white_move"]:
+        zobrist ^= ZOBRIST_SIDE
+
+    gs["zobrist_hash"] = zobrist
+    gs["position_history"].append(zobrist)
+    update_repetition_history(gs, zobrist)
+
+    if gs["white_move"]:
+        moved_king_sq = gs["bk_pos"]
+        opponent_color = WHITE
+    else:
+        moved_king_sq = gs["wk_pos"]
+        opponent_color = BLACK
+
+    if is_square_attacked(board, moved_king_sq, opponent_color):
+        undo_move(gs)
+        return False
+
+    return True
+
+
+def update_castling_rights(gs, move):
+    start_sq = move & 0x7F
+    end_sq = (move >> 7) & 0x7F
+    piece_moved = (move >> 14) & 0x1F
+    piece_captured = (move >> 19) & 0x1F
+
+    # If the king moves
+    if piece_moved == wK:
+        gs["castling_rights"] &= ~(WKS | WQS)
+    elif piece_moved == bK:
+        gs["castling_rights"] &= ~(BKS | BQS)
+    # If a rook moves from its original square
+    elif piece_moved == wR:
+        if start_sq == 0x70:
+            gs["castling_rights"] &= ~WQS
+        elif start_sq == 0x77:
+            gs["castling_rights"] &= ~WKS
+    elif piece_moved == bR:
+        if start_sq == 0x00:
+            gs["castling_rights"] &= ~BQS
+        elif start_sq == 0x07:
+            gs["castling_rights"] &= ~BKS
+    # If a rook is captured on its original square
+    if piece_captured == wR:
+        if end_sq == 0x70:
+            gs["castling_rights"] &= ~WQS
+        elif end_sq == 0x77:
+            gs["castling_rights"] &= ~WKS
+    elif piece_captured == bR:
+        if end_sq == 0x00:
+            gs["castling_rights"] &= ~BQS
+        elif end_sq == 0x07:
+            gs["castling_rights"] &= ~BKS
+
+
+def undo_move(gs):
+    if gs["move_log"]:
+        board = gs["board"]
+        move = gs["move_log"].pop()
+        prev_hash, prev_rep_sig, prev_half_move = gs["state_log"].pop()
+        current_hash = gs["zobrist_hash"]
+        rep_counts = gs["repetition_counts"]
+        count = rep_counts[current_hash]
+
+        if count == 1:
+            del rep_counts[current_hash]
+        else:
+            rep_counts[current_hash] = count - 1
+
+        gs["position_history"].pop()
+        gs["half_move_clock"] = prev_half_move
 
         start_sq = move & 0x7F
         end_sq = (move >> 7) & 0x7F
         piece_moved = (move >> 14) & 0x1F
         piece_captured = (move >> 19) & 0x1F
-        promo = (move >> 24) & 0x7
         is_ep = (move >> 27) & 1
         is_castle = (move >> 28) & 1
 
-        changed_squares = {start_sq, end_sq}
+        board[start_sq] = piece_moved
+        board[end_sq] = piece_captured
 
-        if is_ep:
-            changed_squares.add((start_sq & 0x70) | (end_sq & 7))
+        # Restore piece position sets
+        moving_pieces = gs["white_pieces"] if piece_moved & WHITE else gs["black_pieces"]
+        moving_pieces.remove(end_sq)
+        moving_pieces.add(start_sq)
 
-        if is_castle:
-            if end_sq - start_sq == 2:
-                changed_squares.add(end_sq + 1)
-                changed_squares.add(end_sq - 1)
-            else:
-                changed_squares.add(end_sq - 2)
-                changed_squares.add(end_sq + 1)
-
-        old_square_contents = {
-            square: self.board[square] for square in changed_squares}
-
-        # MOVE LOGIC
-        self.board[start_sq] = EMPTY
-        self.board[end_sq] = piece_moved
-
-        movingPieces = self.white_pieces if piece_moved & WHITE else self.black_pieces
-        movingPieces.remove(start_sq)
-        movingPieces.add(end_sq)
-
+        # Restore captured piece
         if piece_captured and not is_ep:
-            capturedPieces = self.white_pieces if piece_captured & WHITE else self.black_pieces
-            capturedPieces.remove(end_sq)
+            captured_pieces = gs["white_pieces"] if piece_captured & WHITE else gs["black_pieces"]
+            captured_pieces.add(end_sq)
 
-        self.move_log.append(move)
-
-        if piece_moved & TYPE_MASK == PAWN or piece_captured:
-            self.half_move_clock = 0
-        else:
-            self.half_move_clock += 1
-
-        self.white_move = not self.white_move
-
+        gs["white_move"] = not gs["white_move"]
         if piece_moved == wK:
-            self.wk_pos = end_sq
+            gs["wk_pos"] = start_sq
         elif piece_moved == bK:
-            self.bk_pos = end_sq
+            gs["bk_pos"] = start_sq
 
-        if promo:
-            self.board[end_sq] = (piece_moved & COLOR_MASK) | promo
-
-        # En passant
+        # Undo en passant move
         if is_ep:
             ep_cp_sq = (start_sq & 0x70) | (end_sq & 7)
-            self.board[ep_cp_sq] = EMPTY
-            capturedPieces = self.white_pieces if piece_captured & WHITE else self.black_pieces
-            capturedPieces.remove(ep_cp_sq)
+            board[end_sq] = EMPTY
+            board[ep_cp_sq] = piece_captured
+            captured_pieces = gs["white_pieces"] if piece_captured & WHITE else gs["black_pieces"]
+            captured_pieces.add(ep_cp_sq)
 
-        # Update en passant target
-        if piece_moved & TYPE_MASK == PAWN and abs(start_sq - end_sq) == 32:
-            self.en_passant_possible = ((start_sq + end_sq) >> 1)
-        else:
-            self.en_passant_possible = -1
+        gs["en_passant_possible_log"].pop()
+        gs["en_passant_possible"] = gs["en_passant_possible_log"][-1]
 
-        self.en_passant_possible_log.append(self.en_passant_possible)
+        # Undo castling rights
+        gs["castling_rights_log"].pop()
+        gs["castling_rights"] = gs["castling_rights_log"][-1]
 
+        # Undo castling move
         if is_castle:
             if end_sq - start_sq == 2:
-                # Kingside
-                rook_start, rook_end = end_sq + 1, end_sq - 1
+                rook_start, rook_end = end_sq - 1, end_sq + 1
             else:
-                # Queenside
-                rook_start, rook_end = end_sq - 2, end_sq + 1
+                rook_start, rook_end = end_sq + 1, end_sq - 2
+            board[rook_end] = board[rook_start]
+            board[rook_start] = EMPTY
+            moving_pieces.remove(rook_start)
+            moving_pieces.add(rook_end)
 
-            self.board[rook_end] = self.board[rook_start]
-            self.board[rook_start] = EMPTY
-            movingPieces.remove(rook_start)
-            movingPieces.add(rook_end)
+        gs["zobrist_hash"] = prev_hash
+        gs["repetition_signature"] = prev_rep_sig
 
-        # Update castling rights
-        self.update_castling_rights(move)
-        self.castling_rights_log.append(self.castling_rights)
+    gs["checkmate"] = False
+    gs["stalemate"] = False
 
-        # ZOBRIST HASH UPDATE
-        self.zobristHash ^= ZOBRIST_CASTLING[old_castling_rights]
-        if old_enpassant != -1:
-            self.zobristHash ^= ZOBRIST_EP[old_enpassant & 7]
-        if not old_white_move:
-            self.zobristHash ^= ZOBRIST_SIDE
 
-        for sq, old_piece in old_square_contents.items():
-            self.zobristHash ^= ZOBRIST_PIECES[old_piece][sq]
-            self.zobristHash ^= ZOBRIST_PIECES[self.board[sq]][sq]
+def gen_pseudo_legal_moves(gs):
+    moves = []
+    board = gs["board"]
+    white_move = gs["white_move"]
+    if white_move:
+        ally_color, pieces, king_sq = WHITE, gs["white_pieces"], gs["wk_pos"]
+    else:
+        ally_color, pieces, king_sq = BLACK, gs["black_pieces"], gs["bk_pos"]
 
-        self.zobristHash ^= ZOBRIST_CASTLING[self.castling_rights]
-        if self.en_passant_possible != -1:
-            self.zobristHash ^= ZOBRIST_EP[self.en_passant_possible & 7]
-        if not self.white_move:
-            self.zobristHash ^= ZOBRIST_SIDE
+    for sq in pieces:
+        ptype = board[sq] & TYPE_MASK
+        if ptype == PAWN:
+            gen_pawn_moves(board, sq, white_move, gs["en_passant_possible"], moves)
+        elif ptype == KNIGHT:
+            gen_step_moves(board, sq, KNIGHT_OFFSETS, ally_color, moves)
+        elif ptype == BISHOP:
+            gen_slider_moves(board, sq, BISHOP_DIRECTIONS, ally_color, moves)
+        elif ptype == ROOK:
+            gen_slider_moves(board, sq, ROOK_DIRECTIONS, ally_color, moves)
+        elif ptype == QUEEN:
+            gen_slider_moves(board, sq, DIRECTIONS, ally_color, moves)
+        elif ptype == KING:
+            gen_step_moves(board, sq, KING_OFFSETS, ally_color, moves)
 
-        self.positionHistory.append(self.zobristHash)
-        self.update_repetition_history(self.zobristHash)
+    gen_castle_moves(board, king_sq, white_move, gs["castling_rights"], moves)
+    return moves
 
-        if self.white_move:
-            moved_king_sq = self.bk_pos
-            opponent_color = WHITE
-        else:
-            moved_king_sq = self.wk_pos
-            opponent_color = BLACK
 
-        if is_square_attacked(self.board, moved_king_sq, opponent_color):
-            self.undo_move()
-            return False
+def gen_legal_moves(gs):
+    white_move = gs["white_move"]
+    enemy_color = BLACK if white_move else WHITE
+    king_sq = gs["wk_pos"] if white_move else gs["bk_pos"]
+    gs["in_check"] = is_square_attacked(gs["board"], king_sq, enemy_color)
 
-        return True
+    legal_moves = []
+    for move in gen_pseudo_legal_moves(gs):
+        if make_move(gs, move):
+            undo_move(gs)
+            legal_moves.append(move)
 
-    def update_castling_rights(self, move):
-        start_sq = move & 0x7F
-        end_sq = (move >> 7) & 0x7F
-        piece_moved = (move >> 14) & 0x1F
-        piece_captured = (move >> 19) & 0x1F
+    gs["checkmate"] = gs["in_check"] and not legal_moves
+    gs["stalemate"] = not gs["in_check"] and not legal_moves
+    return legal_moves
 
-        # If the king moves
-        if piece_moved == wK:
-            self.castling_rights &= ~(WKS | WQS)
-        elif piece_moved == bK:
-            self.castling_rights &= ~(BKS | BQS)
-        # If a rook moves from its original square
-        elif piece_moved == wR:
-            if start_sq == 0x70:
-                self.castling_rights &= ~WQS
-            elif start_sq == 0x77:
-                    self.castling_rights &= ~WKS
-        elif piece_moved == bR:
-            if start_sq == 0x00:
-                self.castling_rights &= ~BQS
-            elif start_sq == 0x07:
-                self.castling_rights &= ~BKS
-        # If a rook is captured on its original square
-        if piece_captured == wR:
-            if end_sq == 0x70:
-                self.castling_rights &= ~WQS
-            elif end_sq == 0x77:
-                self.castling_rights &= ~WKS
-        elif piece_captured == bR:
-            if end_sq == 0x00:
-                self.castling_rights &= ~BQS
-            elif end_sq == 0x07:
-                self.castling_rights &= ~BKS
-
-    def undo_move(self):
-        if self.move_log:
-            move = self.move_log.pop()
-            prev_hash, prev_rep_sig, prev_half_move = self.stateLog.pop()
-            current_hash = self.zobristHash
-            count = self.repetitionCounts[current_hash]
-
-            if count == 1:
-                del self.repetitionCounts[current_hash]
-            else:
-                self.repetitionCounts[current_hash] = count - 1
-
-            self.positionHistory.pop()
-            self.half_move_clock = prev_half_move
-
-            start_sq = move & 0x7F
-            end_sq = (move >> 7) & 0x7F
-            piece_moved = (move >> 14) & 0x1F
-            piece_captured = (move >> 19) & 0x1F
-            is_ep = (move >> 27) & 1
-            is_castle = (move >> 28) & 1
-
-            self.board[start_sq] = piece_moved
-            self.board[end_sq] = piece_captured
-
-            # Restore piece position sets
-            movingPieces = self.white_pieces if piece_moved & WHITE else self.black_pieces
-            movingPieces.remove(end_sq)
-            movingPieces.add(start_sq)
-
-            # Restore captured piece
-            if piece_captured and not is_ep:
-                capturedPieces = self.white_pieces if piece_captured & WHITE else self.black_pieces
-                capturedPieces.add(end_sq)
-
-            self.white_move = not self.white_move
-            if piece_moved == wK:
-                self.wk_pos = start_sq
-            elif piece_moved == bK:
-                self.bk_pos = start_sq
-
-            # Undo en passant move
-            if is_ep:
-                ep_cp_sq = (start_sq & 0x70) | (end_sq & 7)
-                self.board[end_sq] = EMPTY
-                self.board[ep_cp_sq] = piece_captured
-                capturedPieces = self.white_pieces if piece_captured & WHITE else self.black_pieces
-                capturedPieces.add(ep_cp_sq)
-
-            self.en_passant_possible_log.pop()
-            self.en_passant_possible = self.en_passant_possible_log[-1]
-
-            # Undo castling rights
-            self.castling_rights_log.pop()
-            self.castling_rights = self.castling_rights_log[-1]
-
-            # Undo castling move
-            if is_castle:
-                if end_sq - start_sq == 2:
-                    rook_start, rook_end = end_sq - 1, end_sq + 1
-                else:
-                    rook_start, rook_end = end_sq + 1, end_sq - 2
-                self.board[rook_end] = self.board[rook_start]
-                self.board[rook_start] = EMPTY
-                movingPieces.remove(rook_start)
-                movingPieces.add(rook_end)
-
-            self.zobristHash = prev_hash
-            self.repetitionSignature = prev_rep_sig
-
-        self.checkmate = False
-        self.stalemate = False
-
-    def gen_pseudo_legal_moves(self):
-        moves = []
-        board = self.board
-        if self.white_move:
-            ally_color, pieces, king_sq = WHITE, self.white_pieces, self.wk_pos
-        else:
-            ally_color, pieces, king_sq = BLACK, self.black_pieces, self.bk_pos
-
-        for sq in pieces:
-            ptype = board[sq] & TYPE_MASK
-            if ptype == PAWN:
-                gen_pawn_moves(board, sq, self.white_move, self.en_passant_possible, moves)
-            elif ptype == KNIGHT:
-                gen_step_moves(board, sq, KNIGHT_OFFSETS, ally_color, moves)
-            elif ptype == BISHOP:
-                gen_slider_moves(board, sq, BISHOP_DIRECTIONS, ally_color, moves)
-            elif ptype == ROOK:
-                gen_slider_moves(board, sq, ROOK_DIRECTIONS, ally_color, moves)
-            elif ptype == QUEEN:
-                gen_slider_moves(board, sq, DIRECTIONS, ally_color, moves)
-            elif ptype == KING:
-                gen_step_moves(board, sq, KING_OFFSETS, ally_color, moves)
-
-        gen_castle_moves(board, king_sq, self.white_move, self.castling_rights, moves)
-        return moves
-
-    def gen_legal_moves(self):
-        enemy_color = BLACK if self.white_move else WHITE
-        king_sq = self.wk_pos if self.white_move else self.bk_pos
-        self.in_check = is_square_attacked(self.board, king_sq, enemy_color)
-
-        legal_moves = []
-        for move in self.gen_pseudo_legal_moves():
-            if self.make_move(move):
-                self.undo_move()
-                legal_moves.append(move)
-
-        self.checkmate = self.in_check and not legal_moves
-        self.stalemate = not self.in_check and not legal_moves
-        return legal_moves
 
 def is_square_attacked(board, sq, by_color):
     # Pawn attacks

@@ -6,9 +6,9 @@ from chess_board import (
     WHITE, BLACK, wP, bP, TYPE_MASK,
     move_start, move_end, move_piece, move_captured,
     move_promo, move_is_castle, is_square_attacked,
+    gen_pseudo_legal_moves, get_search_key, make_move, undo_move,
 )
 import time
-import random
 
 nodes = 0
 
@@ -133,9 +133,6 @@ UPPER_BOUND = 2
 TT_MASK = (1 << 20) - 1
 transposition_table = {}
 
-def get_search_key(gs):
-    return gs.get_search_key()
-
 def score_to_tt(score, ply):
     if score > CHECKMATE - 1000:
         return score + ply
@@ -201,13 +198,13 @@ def find_best_move(gs, legal_moves=None, return_queue=None):
     global next_move, nodes, current_root_depth
     nodes = 0
 
-    root_moves = list(legal_moves) if legal_moves is not None else gs.gen_pseudo_legal_moves()
+    root_moves = list(legal_moves) if legal_moves is not None else gen_pseudo_legal_moves(gs)
     if not root_moves:
         return None
 
     next_move = root_moves[0]
     start = time.perf_counter()
-    color_multiplier = 1 if gs.white_move else -1
+    color_multiplier = 1 if gs["white_move"] else -1
 
     for depth in range(1, DEPTH + 1):
         current_root_depth = depth
@@ -243,7 +240,7 @@ def negamax(
     original_alpha = alpha
     original_beta = beta
 
-    if (ply > 0 and gs.repetitionCounts.get(gs.zobristHash, 0) >= 2) or gs.half_move_clock >= 100:
+    if (ply > 0 and gs["repetition_counts"].get(gs["zobrist_hash"], 0) >= 2) or gs["half_move_clock"] >= 100:
         return 0
 
     position_key = get_search_key(gs)
@@ -252,7 +249,6 @@ def negamax(
 
     if tt_entry is not None and ply > 0 and tt_entry["depth"] >= depth:
         tt_score = score_from_tt(tt_entry["score"], ply)
-        flag = tt_entry["flag"]
 
         if tt_entry["flag"] == EXACT:
             return tt_score
@@ -264,7 +260,7 @@ def negamax(
         if alpha >= beta:
             return tt_score
 
-    moves = list(root_moves) if root_moves is not None else gs.gen_pseudo_legal_moves()
+    moves = list(root_moves) if root_moves is not None else gen_pseudo_legal_moves(gs)
 
     if depth == 0:
         return quiescence(
@@ -285,7 +281,7 @@ def negamax(
     for i in range(len(moves)):
         move = pick_next_move(moves, move_scores, i)
 
-        if not gs.make_move(move):
+        if not make_move(gs, move):
             continue
         legal_moves_searched += 1
 
@@ -298,7 +294,7 @@ def negamax(
             ply=ply + 1,
         )
 
-        gs.undo_move()
+        undo_move(gs)
 
         if score > max_score:
             max_score = score
@@ -311,9 +307,9 @@ def negamax(
             break
 
     if legal_moves_searched == 0:
-        king_sq = gs.wk_pos if gs.white_move else gs.bk_pos
-        enemy_color = BLACK if gs.white_move else WHITE
-        if is_square_attacked(gs.board, king_sq, enemy_color):
+        king_sq = gs["wk_pos"] if gs["white_move"] else gs["bk_pos"]
+        enemy_color = BLACK if gs["white_move"] else WHITE
+        if is_square_attacked(gs["board"], king_sq, enemy_color):
             return -(CHECKMATE - ply)
         return 0
 
@@ -358,12 +354,12 @@ def quiescence(gs, alpha, beta, color_multiplier, ply=0, q_depth=0):
     global nodes
     nodes += 1
 
-    if (ply > 0 and gs.repetitionCounts.get(gs.zobristHash, 0) >= 2) or gs.half_move_clock >= 100:
+    if (ply > 0 and gs["repetition_counts"].get(gs["zobrist_hash"], 0) >= 2) or gs["half_move_clock"] >= 100:
         return 0
 
-    king_sq = gs.wk_pos if gs.white_move else gs.bk_pos
-    enemy_color = BLACK if gs.white_move else WHITE
-    in_check = is_square_attacked(gs.board, king_sq, enemy_color)
+    king_sq = gs["wk_pos"] if gs["white_move"] else gs["bk_pos"]
+    enemy_color = BLACK if gs["white_move"] else WHITE
+    in_check = is_square_attacked(gs["board"], king_sq, enemy_color)
 
     if not in_check:
         stand_pat = color_multiplier * score_board(gs)
@@ -376,12 +372,12 @@ def quiescence(gs, alpha, beta, color_multiplier, ply=0, q_depth=0):
             return stand_pat
 
         moves = [
-            m for m in gs.gen_pseudo_legal_moves()
+            m for m in gen_pseudo_legal_moves(gs)
             if move_captured(m) or move_promo(m)
         ]
     else:
         # Must search evasions when in check to avoid missing checkmate at MAX_Q_DEPTH
-        moves = gs.gen_pseudo_legal_moves()
+        moves = gen_pseudo_legal_moves(gs)
 
     scores = [move_priority(m) for m in moves]
     legal_moves_searched = 0
@@ -395,7 +391,7 @@ def quiescence(gs, alpha, beta, color_multiplier, ply=0, q_depth=0):
             if stand_pat + captured_val + 150 < alpha:
                 continue
 
-        if not gs.make_move(move):
+        if not make_move(gs, move):
             continue
         legal_moves_searched += 1
 
@@ -408,7 +404,7 @@ def quiescence(gs, alpha, beta, color_multiplier, ply=0, q_depth=0):
             q_depth + 1
         )
 
-        gs.undo_move()
+        undo_move(gs)
 
         if score >= beta:
             return beta
@@ -421,37 +417,38 @@ def quiescence(gs, alpha, beta, color_multiplier, ply=0, q_depth=0):
     return alpha
 
 def score_board(gs):
+    board = gs["board"]
     score = 0
     non_pawn_material = 0
 
-    for sq in gs.white_pieces:
-        piece = gs.board[sq]
+    for sq in gs["white_pieces"]:
+        piece = board[sq]
         piece_type = piece & TYPE_MASK
         if piece_type != KING:
             val = piece_value[piece_type]
             score += val + piece_position_scores[piece][sq]
             if piece_type != PAWN:
-                    non_pawn_material += val
+                non_pawn_material += val
 
-    for sq in gs.black_pieces:
-        piece = gs.board[sq]
+    for sq in gs["black_pieces"]:
+        piece = board[sq]
         piece_type = piece & TYPE_MASK
         if piece_type != KING:
             val = piece_value[piece_type]
             score -= val + piece_position_scores[piece][sq]
             if piece_type != PAWN:
-                    non_pawn_material += val
+                non_pawn_material += val
 
     mg_phase = min(non_pawn_material, 6400) / 6400.0
     eg_phase = 1.0 - mg_phase
 
     wk_score = (
-        mg_phase * piece_position_scores[WHITE | KING][gs.wk_pos]
-        + eg_phase * king_eg_position_scores[WHITE | KING][gs.wk_pos]
+        mg_phase * piece_position_scores[WHITE | KING][gs["wk_pos"]]
+        + eg_phase * king_eg_position_scores[WHITE | KING][gs["wk_pos"]]
     )
     bk_score = (
-        mg_phase * piece_position_scores[BLACK | KING][gs.bk_pos]
-        + eg_phase * king_eg_position_scores[BLACK | KING][gs.bk_pos]
+        mg_phase * piece_position_scores[BLACK | KING][gs["bk_pos"]]
+        + eg_phase * king_eg_position_scores[BLACK | KING][gs["bk_pos"]]
     )
     score += int(wk_score - bk_score)
 
