@@ -21,6 +21,7 @@ WINDOW_HEIGHT = BOARD_SIZE
 TILE_SIZE = BOARD_SIZE // 8
 FPS = 30
 ANIM_SECS = 0.16
+DRAG_DELAY_SECS = 0.10
 
 LIGHT_TILE = (255, 255, 255)
 DARK_TILE = (245, 220, 247)
@@ -114,6 +115,8 @@ def kill_engine(ui, restart=False):
 def deselect_sq(ui):
     ui["selected_sq"] = None
     ui["selected_moves"] = []
+    ui["dragging_sq"] = None
+    ui["drag_start_time"] = 0
 
 def select_sq(ui, sq):
     if sq is None:
@@ -186,6 +189,11 @@ def handle_event(p, screen, clock, sprites, fonts, ui, event):
             on_lmb(p, screen, clock, sprites, fonts, ui, event.pos)
         return
 
+    if event.type == p.MOUSEBUTTONUP:
+        if event.button == 1:
+            on_lmb_up(p, screen, clock, sprites, fonts, ui, event.pos)
+        return
+
     if event.type == p.KEYDOWN and not ui["menu_open"]:
         if event.key == p.K_ESCAPE and ui["pending_promo"] is not None:
             ui["pending_promo"] = None
@@ -232,7 +240,7 @@ def on_lmb(p, screen, clock, sprites, fonts, ui, pos):
         return
 
     clicked_sq = xy_to_sq(pos)
-    if clicked_sq is None or clicked_sq == ui["selected_sq"]:
+    if clicked_sq is None:
         deselect_sq(ui)
         return
 
@@ -246,6 +254,35 @@ def on_lmb(p, screen, clock, sprites, fonts, ui, pos):
             return
 
     select_sq(ui, clicked_sq)
+    if ui["selected_sq"] is not None:
+        ui["dragging_sq"] = clicked_sq
+        ui["drag_start_time"] = time.perf_counter()
+
+def on_lmb_up(p, screen, clock, sprites, fonts, ui, pos):
+    was_dragging = is_actively_dragging(ui)
+    drag_sq = ui["dragging_sq"]
+    ui["dragging_sq"] = None
+    ui["drag_start_time"] = 0
+
+    if not was_dragging or drag_sq is None:
+        return
+
+    drop_sq = xy_to_sq(pos)
+    if drop_sq is None or drop_sq == drag_sq:
+        return
+
+    candidates = [m for m in ui["selected_moves"] if move_end(m) == drop_sq]
+    if candidates:
+        if move_promo(candidates[0]):
+            ui["pending_promo"] = candidates[0]
+        else:
+            exec_ply(p, screen, clock, sprites, fonts, ui, candidates[0], animate=False)
+
+def is_actively_dragging(ui):
+    return (
+        ui["dragging_sq"] is not None
+        and (time.perf_counter() - ui["drag_start_time"]) >= DRAG_DELAY_SECS
+    )
 
 def poll_engine(p, screen, clock, sprites, fonts, ui):
     if ui["menu_open"] or get_game_outcome(ui["gs"]) is not None or is_human_ply(ui) or ui["engine_paused"]:
@@ -503,11 +540,26 @@ def draw_outcome_banner(p, screen, banner_font, message):
     screen.blit(label, label.get_rect(center=box.center))
 
 def render_frame(p, screen, sprites, fonts, ui):
+    dragging = is_actively_dragging(ui)
     draw_tiles(p, screen)
     draw_last_move(p, screen, ui)
     draw_move_hints(p, screen, ui)
-    draw_pieces(screen, ui["gs"]["board"], sprites)
+    draw_pieces(
+        screen,
+        ui["gs"]["board"],
+        sprites,
+        exclude_sq=ui["dragging_sq"] if dragging else None,
+    )
+
     draw_move_log(p, screen, fonts["log"], ui)
+
+    if dragging:
+        piece = ui["gs"]["board"][ui["dragging_sq"]]
+        if piece != EMPTY:
+            mx, my = p.mouse.get_pos()
+            mx = max(0, min(mx, BOARD_SIZE))
+            my = max(0, min(my, BOARD_SIZE))
+            screen.blit(sprites[piece], (mx - TILE_SIZE // 2, my - TILE_SIZE // 2))
 
     if ui["pending_promo"] is not None:
         draw_promo_overlay(p, screen, sprites, ui["pending_promo"])
@@ -540,6 +592,8 @@ def main():
         "human_black": False,
         "menu_open": True,
         "selected_sq": None,
+        "dragging_sq": None,
+        "drag_start_time": 0.0,
         "selected_moves": [],
         "pending_promo": None,
         "log_scroll": 0,
