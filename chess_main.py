@@ -4,6 +4,7 @@
 
 from multiprocessing import Process, Queue
 import time
+import math
 
 from chess_board import (
     BISHOP, BLACK, COLOR_MASK, EMPTY, KING, KNIGHT, QUEEN, ROOK, WHITE,
@@ -30,6 +31,9 @@ SELECTED_TILE = (0, 0, 255, 75)
 HOVER_TILE = (0, 0, 255, 40)
 MOVE_INDICATOR = (0, 0, 192, 75)
 LAST_MOVE_TILE = (106, 106, 255, 75)
+
+HIGHLIGHT_TILE = (235, 100, 80, 255)
+ARROW_COLOR = (255, 80, 185, 255)
 
 PROMOTION_CHOICES = (QUEEN, ROOK, BISHOP, KNIGHT)
 PIECE_FILENAMES = {
@@ -151,6 +155,7 @@ def reset_board(ui):
     ui["pending_promo"] = None
     ui["engine_paused"] = False
     ui["log_scroll"] = 0
+    clear_annotations(ui)
 
 def undo_ply(fonts, ui):
     if ui["pending_promo"] is not None:
@@ -187,11 +192,15 @@ def handle_event(p, screen, clock, sprites, fonts, ui, event):
 
         if event.button == 1:
             on_lmb(p, screen, clock, sprites, fonts, ui, event.pos)
+        elif event.button == 3:
+            on_rmb(ui, event.pos)
         return
 
     if event.type == p.MOUSEBUTTONUP:
         if event.button == 1:
             on_lmb_up(p, screen, clock, sprites, fonts, ui, event.pos)
+        elif event.button == 3:
+            on_rmb_up(ui, event.pos)
         return
 
     if event.type == p.KEYDOWN and not ui["menu_open"]:
@@ -206,6 +215,42 @@ def handle_event(p, screen, clock, sprites, fonts, ui, event):
             reset_board(ui)
         elif event.key == p.K_e:
             print(ui["gs"]["board"])
+
+def is_valid_arrow(src, dst):
+    if src is None or dst is None or src == dst:
+        return False
+    dr = abs((dst >> 4) - (src >> 4))
+    dc = abs((dst & 7) - (src & 7))
+    is_slider = (dr == 0) or (dc == 0) or (dr == dc)
+    is_knight = (dr, dc) in ((1, 2), (2, 1))
+    return is_slider or is_knight
+
+def on_rmb(ui, pos):
+    if ui["menu_open"] or ui["pending_promo"] is not None:
+        return
+    ui["rmb_start_sq"] = xy_to_sq(pos)
+
+def on_rmb_up(ui, pos):
+    start_sq = ui["rmb_start_sq"]
+    ui["rmb_start_sq"] = None
+    if start_sq is None or ui["menu_open"] or ui["pending_promo"] is not None:
+        return
+
+    end_sq = xy_to_sq(pos)
+    if end_sq is None:
+        return
+
+    if end_sq == start_sq:
+        if start_sq in ui["highlights"]:
+            ui["highlights"].remove(start_sq)
+        else:
+            ui["highlights"].add(start_sq)
+    elif is_valid_arrow(start_sq, end_sq):
+        arrow = (start_sq, end_sq)
+        if arrow in ui["arrows"]:
+            ui["arrows"].remove(arrow)
+        else:
+            ui["arrows"].add(arrow)
 
 def on_lmb(p, screen, clock, sprites, fonts, ui, pos):
     if ui["menu_open"]:
@@ -224,6 +269,8 @@ def on_lmb(p, screen, clock, sprites, fonts, ui, pos):
             ui["engine_paused"] = False
             deselect_sq(ui)
         return
+
+    clear_annotations(ui)
 
     if ui["pending_promo"] is not None:
         choice = pick_promo_choice(p, pos, ui["pending_promo"])
@@ -283,6 +330,11 @@ def is_actively_dragging(ui):
         ui["dragging_sq"] is not None
         and (time.perf_counter() - ui["drag_start_time"]) >= DRAG_DELAY_SECS
     )
+
+def clear_annotations(ui):
+    ui["highlights"].clear()
+    ui["arrows"].clear()
+    ui["rmb_start_sq"] = None
 
 def poll_engine(p, screen, clock, sprites, fonts, ui):
     if ui["menu_open"] or get_game_outcome(ui["gs"]) is not None or is_human_ply(ui) or ui["engine_paused"]:
@@ -357,6 +409,125 @@ def play_move_animation(p, screen, clock, sprites, fonts, ui, move, snapshot):
         if progress >= 1.0:
             break
         clock.tick(FPS)
+
+def sq_center(sq):
+    x, y = sq_to_xy(sq)
+    return x + TILE_SIZE // 2, y + TILE_SIZE // 2
+
+def draw_arrow_segment(p, surface, start, end, color, is_head):
+    sx, sy = start
+    ex, ey = end
+    dx, dy = ex - sx, ey - sy
+    length = math.hypot(dx, dy)
+    if length == 0:
+        return
+
+    ux, uy = dx / length, dy / length
+    px, py = -uy, ux
+
+    shaft_half = TILE_SIZE * 0.11
+    head_len = TILE_SIZE * 0.36
+    head_half = TILE_SIZE * 0.25
+
+    if not is_head:
+        ext_ex = ex + ux * shaft_half
+        ext_ey = ey + uy * shaft_half
+        pts = [
+            (sx + px * shaft_half, sy + py * shaft_half),
+            (sx - px * shaft_half, sy - py * shaft_half),
+            (ext_ex - px * shaft_half, ext_ey - py * shaft_half),
+            (ext_ex + px * shaft_half, ext_ey + py * shaft_half),
+        ]
+        p.draw.polygon(surface, color, pts)
+        return
+
+    neck_x = ex - ux * head_len
+    neck_y = ey - uy * head_len
+    pts = [
+        (sx + px * shaft_half, sy + py * shaft_half),
+        (sx - px * shaft_half, sy - py * shaft_half),
+        (neck_x - px * shaft_half, neck_y - py * shaft_half),
+        (neck_x - px * head_half, neck_y - py * head_half),
+        (ex, ey),
+        (neck_x + px * head_half, neck_y + py * head_half),
+        (neck_x + px * shaft_half, neck_y + py * shaft_half),
+    ]
+    p.draw.polygon(surface, color, pts)
+
+def draw_single_arrow(p, surface, src, dst, color):
+    sx, sy = sq_center(src)
+    ex, ey = sq_center(dst)
+    dr = (dst >> 4) - (src >> 4)
+    dc = (dst & 7) - (src & 7)
+
+    start_trim = TILE_SIZE * 0.22
+    end_trim = TILE_SIZE * 0.18
+
+    if (abs(dr), abs(dc)) in ((1, 2), (2, 1)):
+        if abs(dc) == 2:
+            elbow = (ex, sy)
+            sx += math.copysign(start_trim, dc)
+            ey -= math.copysign(end_trim, dr)
+        else:
+            elbow = (sx, ey)
+            sy += math.copysign(start_trim, dr)
+            ex -= math.copysign(end_trim, dc)
+
+        draw_arrow_segment(p, surface, (sx, sy), elbow, color, is_head=False)
+        draw_arrow_segment(p, surface, elbow, (ex, ey), color, is_head=True)
+    else:
+        angle = math.atan2(ey - sy, ex - sx)
+        ux, uy = math.cos(angle), math.sin(angle)
+        start = (sx + ux * start_trim, sy + uy * start_trim)
+        end = (ex - ux * end_trim, ey - uy * end_trim)
+        draw_arrow_segment(p, surface, start, end, color, is_head=True)
+
+def draw_highlight_annotations(p, screen, ui):
+    start_sq = ui["rmb_start_sq"]
+    preview_sq = xy_to_sq(p.mouse.get_pos()) if start_sq is not None else None
+    has_preview = (
+        start_sq is not None
+        and preview_sq == start_sq
+        and start_sq not in ui["highlights"]
+    )
+
+    if not ui["highlights"] and not has_preview:
+        return
+
+    overlay = p.Surface((BOARD_SIZE, BOARD_SIZE), p.SRCALPHA)
+
+    for sq in ui["highlights"]:
+        x, y = sq_to_xy(sq)
+        p.draw.rect(overlay, HIGHLIGHT_TILE, (x, y, TILE_SIZE, TILE_SIZE))
+
+    if has_preview:
+        x, y = sq_to_xy(start_sq)
+        p.draw.rect(overlay, HIGHLIGHT_TILE, (x, y, TILE_SIZE, TILE_SIZE))
+
+    screen.blit(overlay, (0, 0))
+
+
+def draw_arrow_annotations(p, screen, ui):
+    start_sq = ui["rmb_start_sq"]
+    preview_sq = xy_to_sq(p.mouse.get_pos()) if start_sq is not None else None
+    has_preview = (
+        start_sq is not None
+        and is_valid_arrow(start_sq, preview_sq)
+        and (start_sq, preview_sq) not in ui["arrows"]
+    )
+
+    if not ui["arrows"] and not has_preview:
+        return
+
+    overlay = p.Surface((BOARD_SIZE, BOARD_SIZE), p.SRCALPHA)
+
+    for src, dst in ui["arrows"]:
+        draw_single_arrow(p, overlay, src, dst, ARROW_COLOR)
+
+    if has_preview:
+        draw_single_arrow(p, overlay, start_sq, preview_sq, ARROW_COLOR)
+
+    screen.blit(overlay, (0, 0))
 
 def draw_move_squares(p, surface, move):
     tile = p.Surface((TILE_SIZE, TILE_SIZE), p.SRCALPHA)
@@ -543,6 +714,7 @@ def render_frame(p, screen, sprites, fonts, ui):
     dragging = is_actively_dragging(ui)
     draw_tiles(p, screen)
     draw_last_move(p, screen, ui)
+    draw_highlight_annotations(p, screen, ui)
     draw_move_hints(p, screen, ui)
     draw_pieces(
         screen,
@@ -550,6 +722,7 @@ def render_frame(p, screen, sprites, fonts, ui):
         sprites,
         exclude_sq=ui["dragging_sq"] if dragging else None,
     )
+    draw_arrow_annotations(p, screen, ui)
 
     draw_move_log(p, screen, fonts["log"], ui)
 
@@ -595,6 +768,9 @@ def main():
         "dragging_sq": None,
         "drag_start_time": 0.0,
         "selected_moves": [],
+        "highlights": set(),
+        "arrows": set(),
+        "rmb_start_sq": None,
         "pending_promo": None,
         "log_scroll": 0,
         "engine_process": None,
