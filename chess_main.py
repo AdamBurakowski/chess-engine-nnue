@@ -136,8 +136,11 @@ def select_sq(ui, sq):
 
 def exec_ply(p, screen, clock, sprites, fonts, ui, move, animate=True):
     gs = ui["gs"]
+    san = move_to_san(gs, move, ui["legal_moves"])
     snapshot = render_board_snapshot(p, gs["board"], sprites, exclude_sq=move_start(move), highlight_move=move) if animate else None
     make_move(gs, move)
+    gs["san_log"].append(san)
+
     if animate:
         play_move_animation(p, screen, clock, sprites, fonts, ui, move, snapshot)
 
@@ -168,6 +171,7 @@ def undo_ply(fonts, ui):
 
     kill_engine(ui, restart=True)
     undo_move(ui["gs"])
+    ui["gs"]["san_log"].pop()
     ui["legal_moves"] = gen_legal_moves(ui["gs"])
     deselect_sq(ui)
     ui["engine_paused"] = not is_human_ply(ui)
@@ -664,11 +668,11 @@ def draw_move_log(p, screen, log_font, ui):
     panel = p.Rect(BOARD_SIZE, 0, LOG_PANEL_WIDTH, WINDOW_HEIGHT)
     p.draw.rect(screen, (0, 0, 0), panel)
 
-    moves = ui["gs"]["move_log"]
+    sans = ui["gs"]["san_log"]  # Sans Undertale
     rows = [
-        f"{i // 2 + 1}. {move_to_san(moves[i])}"
-        + (f" {move_to_san(moves[i + 1])}" if i + 1 < len(moves) else "")
-        for i in range(0, len(moves), 2)
+        f"{i // 2 + 1}. {sans[i]}"
+        + (f" {sans[i + 1]}" if i + 1 < len(sans) else "")
+        for i in range(0, len(sans), 2)
     ]
 
     padding = 10

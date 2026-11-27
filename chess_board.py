@@ -80,6 +80,7 @@ def create_game_state():
         },
         "white_move": True,
         "move_log": [],
+        "san_log": [],
         "wk_pos": 0x74,
         "bk_pos": 0x04,
         "checkmate": False,
@@ -655,26 +656,66 @@ def move_to_uci(move):
     promo = PIECE_SYMBOLS[move_promo(move)].lower() if move_promo(move) else ""
     return sq_to_algebraic(move_start(move)) + sq_to_algebraic(move_end(move)) + promo
 
-def move_to_san(move):
+def move_to_san(gs, move, legal_moves=None):
+    if legal_moves is None:
+        legal_moves = gen_legal_moves(gs)
+
     start_sq = move_start(move)
     end_sq = move_end(move)
     piece_moved = move_piece(move)
+    ptype = piece_moved & TYPE_MASK
     captured = move_captured(move)
     promo = move_promo(move)
 
     if move_is_castle(move):
-        return "O-O" if (end_sq & 7) == 6 else "O-O-O"
-
-    end_square = sq_to_algebraic(end_sq)
-
-    if (piece_moved & TYPE_MASK) == PAWN:
+        san = "O-O" if (end_sq & 7) == 6 else "O-O-O"
+    elif ptype == PAWN:
+        end_square = sq_to_algebraic(end_sq)
         promo_str = f"={PIECE_SYMBOLS[promo]}" if promo else ""
         if captured:
-            return f"{COLS_TO_FILES[start_sq & 7]}x{end_square}{promo_str}"
-        return f"{end_square}{promo_str}"
+            san = f"{COLS_TO_FILES[start_sq & 7]}x{end_square}{promo_str}"
+        else:
+            san = f"{end_square}{promo_str}"
+    else:
+        disambig = ""
+        if ptype != KING:
+            same_dest_starts = [
+                move_start(m)
+                for m in legal_moves
+                if m != move
+                and move_end(m) == end_sq
+                and (move_piece(m) & TYPE_MASK) == ptype
+            ]
+            if same_dest_starts:
+                start_file = start_sq & 7
+                start_rank = start_sq >> 4
+                same_file = any((sq & 7) == start_file for sq in same_dest_starts)
+                same_rank = any((sq >> 4) == start_rank for sq in same_dest_starts)
 
-    piece_str = PIECE_SYMBOLS[piece_moved & TYPE_MASK]
-    if captured:
-        piece_str += "x"
-    return piece_str + end_square
+                if not same_file:
+                    disambig = COLS_TO_FILES[start_file]
+                elif not same_rank:
+                    disambig = ROWS_TO_RANKS[start_rank]
+                else:
+                    disambig = sq_to_algebraic(start_sq)
+
+        capture_str = "x" if captured else ""
+        san = f"{PIECE_SYMBOLS[ptype]}{disambig}{capture_str}{sq_to_algebraic(end_sq)}"
+
+    if make_move(gs, move):
+        enemy_color = BLACK if gs["white_move"] else WHITE
+        enemy_king_sq = gs["wk_pos"] if gs["white_move"] else gs["bk_pos"]
+
+        if is_square_attacked(gs["board"], enemy_king_sq, enemy_color):
+            has_reply = False
+            for reply in gen_pseudo_legal_moves(gs):
+                if make_move(gs, reply):
+                    undo_move(gs)
+                    has_reply = True
+                    break
+            san += "#" if not has_reply else "+"
+
+        undo_move(gs)
+
+    return san
 
